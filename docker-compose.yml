@@ -1,0 +1,17 @@
+version: "3.9"
+services:
+  cluster0:
+    build: .
+    environment:
+      BOT_TOKENS: "token1, token2"
+      CLUSTER_ID: 0
+      TOTAL_CLUSTERS: 2
+    restart: unless-stopped
+
+  cluster1:
+    build: .
+    environment:
+      BOT_TOKENS: "token1, token2"
+      CLUSTER_ID: 1
+      TOTAL_CLUSTERS: 2
+    restart: unless-stopped
