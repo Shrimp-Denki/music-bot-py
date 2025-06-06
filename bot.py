@@ -36,14 +36,15 @@ def get_owner(cid:int)->int|None:  r=conn.execute("SELECT owner_id FROM owners W
 def clear_owner(cid:int):          conn.execute("DELETE FROM owners WHERE channel_id=?", (cid,))
 
 # ╭─ yt-dlp & FFmpeg ─╮
-YTDL_OPTS = {
+YTDL = yt_dlp.YoutubeDL({
     "format": "bestaudio/best",
     "quiet": True,
     "default_search": "scsearch",
-    "no_warnings": True,
-    "ignoreerrors": True,
-}
-YTDL = yt_dlp.YoutubeDL(YTDL_OPTS)
+    # "geo_bypass": True, 
+    # "geo_bypass_country": "VN",
+    "extractflat": False,
+    "extract_flat": False
+})
 FFMPEG_OPTS = {"before_options":"-nostdin -reconnect 1 -reconnect_delay_max 5",
                "options":"-vn -loglevel error"}
 
@@ -137,57 +138,148 @@ def detect_platform_from_url(url: str) -> str:
     return 'youtube'
 
 def _blocking_fetch(q: str):
-    """Fetch music/playlist information using yt-dlp."""
-
-    import logging
-    import yt_dlp
-
-    log = logging.getLogger(f"cluster-{os.getenv('CLUSTER_ID', '0')}")
-
-    opts = YTDL_OPTS.copy()
-    opts["extract_flat"] = True  # faster playlist processing
-
-    ytdl = yt_dlp.YoutubeDL(opts)
-
+    """Fetch music info with platform detection"""
+    platform = 'youtube'  # Default platform
+    search_term = q  # Default search term
+    
     try:
-        data = ytdl.extract_info(q, download=False)
-
+        platform, search_term = parse_query(q)
+        # Use the log variable from the main module
+        import logging
+        log = logging.getLogger(f"cluster-{os.getenv('CLUSTER_ID', '0')}")
+        log.info(f"Platform: {platform}, Search: {search_term}")
+        
+        # Get YTDL from main module - we'll need to pass it as parameter or make it global
+        # For now, create a local instance
+        import yt_dlp
+        
+        ytdl_base_opts = {
+            "format": "bestaudio/best",
+            "quiet": True,
+            "default_search": "ytsearch",
+            "extractflat": False,
+            "extract_flat": False,
+            "no_warnings": True,
+            "ignoreerrors": True
+        }
+        
+        # Configure yt-dlp based on platform
+        ytdl_opts = ytdl_base_opts.copy()
+        
+        # Set the correct default_search for each platform
+        if platform == 'soundcloud':
+            ytdl_opts['default_search'] = 'scsearch'
+        elif platform == 'youtube':
+            ytdl_opts['default_search'] = 'ytsearch'
+        else:
+            ytdl_opts['default_search'] = 'scsearch'
+            #taserandom = random.randint(1,2)
+            #if taserandom == 1:
+            #    ytdl_opts['default_search'] = 'scsearch'
+            #else:
+            #    ytdl_opts['default_search'] = 'ytsearch'
+        
+        # Create temporary YTDL instance with updated options
+        temp_ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+        
+        # Handle special platforms that need metadata extraction
+        if platform in ['spotify', 'applemusic', 'deezer', 'yandex'] and search_term.startswith(('http://', 'https://')):
+            try:
+                # Try to extract metadata from the URL
+                metadata = temp_ytdl.extract_info(search_term, download=False)
+                if metadata:
+                    # Create search query from metadata
+                    title = metadata.get('title', '')
+                    artist = metadata.get('artist', '') or metadata.get('uploader', '')
+                    album = metadata.get('album', '')
+                    
+                    # Build search query
+                    search_parts = [title]
+                    if artist:
+                        search_parts.append(artist)
+                    if album and len(search_parts) < 2:
+                        search_parts.append(album)
+                    
+                    # Use ytsearch for these platforms
+                    search_query = ' '.join(search_parts)
+                    log.info(f"Converted {platform} URL to search: {search_query}")
+                    
+                    # Search on YouTube with ytsearch
+                    youtube_ytdl = yt_dlp.YoutubeDL({**ytdl_base_opts, 'default_search': 'ytsearch'})
+                    data = youtube_ytdl.extract_info(search_query, download=False)
+                else:
+                    # Fallback to original query
+                    data = temp_ytdl.extract_info(search_term, download=False)
+            except Exception as e:
+                log.warning(f"Failed to extract from {platform}: {e}")
+                # Fallback to YouTube search
+                youtube_ytdl = yt_dlp.YoutubeDL({**ytdl_base_opts, 'default_search': 'ytsearch'})
+                data = youtube_ytdl.extract_info(search_term, download=False)
+        else:
+            # For direct search queries or URLs
+            if search_term.startswith(('http://', 'https://')):
+                # It's a URL, extract directly
+                data = temp_ytdl.extract_info(search_term, download=False)
+            else:
+                # It's a search term, use the configured search prefix
+                data = temp_ytdl.extract_info(search_term, download=False)
+        
+        # Process results
         if data and "entries" in data:
-            return [e for e in data["entries"] if e]
+            results = [entry for entry in data["entries"] if entry]
+            # Tag results with platform info
+            for result in results:
+                if result:
+                    result['detected_platform'] = platform
+            return results
         elif data:
+            data['detected_platform'] = platform
             return [data]
-
+        
     except Exception as e:
-        log.error(f"Error fetching info: {e}")
-
+        # Handle the case where log might not be defined
+        try:
+            log.error(f"Error fetching from {platform}: {e}")
+        except:
+            print(f"Error fetching from {platform}: {e}")
+        
+        try:
+            # Fallback to default YouTube search
+            search_term_fallback = search_term
+            # Remove any platform prefix from the fallback search
+            if ':' in search_term_fallback and not search_term_fallback.startswith(('http://', 'https://')):
+                search_term_fallback = search_term_fallback.split(':', 1)[1]
+            
+            fallback_ytdl = yt_dlp.YoutubeDL({
+                "format": "bestaudio/best",
+                "quiet": True,
+                "default_search": "scsearch",
+                "extractflat": False,
+                "extract_flat": False,
+                "no_warnings": True,
+                "ignoreerrors": True
+            })
+            data = fallback_ytdl.extract_info(search_term_fallback, download=False)
+            if data and "entries" in data:
+                results = [entry for entry in data["entries"] if entry]
+                for result in results:
+                    if result:
+                        result['detected_platform'] = 'youtube'
+                return results
+            elif data:
+                data['detected_platform'] = 'youtube'
+                return [data]
+        except Exception as fallback_error:
+            try:
+                log.error(f"Fallback search also failed: {fallback_error}")
+            except:
+                print(f"Fallback search also failed: {fallback_error}")
+    
     return []
 
-async def fetch_info(q:str):
+async def fetch_info(q:str): 
     result = await asyncio.get_running_loop().run_in_executor(None, _blocking_fetch, q)
     return result if isinstance(result, list) else [result] if result else []
-
-def _blocking_ensure_audio(info:dict):
-    import yt_dlp
-    try:
-        data = YTDL.extract_info(info.get("webpage_url") or info.get("url"), download=False)
-        if not data:
-            return None
-        if "entries" in data:
-            data = data["entries"][0]
-        if not data:
-            return None
-        info.update(data)
-        return info
-    except Exception as e:
-        log.error(f"Error ensuring audio: {e}")
-        return None
-
-async def ensure_audio(info:dict):
-    if not info.get("url") or info.get("url") == info.get("webpage_url"):
-        result = await asyncio.get_running_loop().run_in_executor(None, _blocking_ensure_audio, info)
-        if result is None:
-            return None
-    return info
 
 # ╭─ STATE ─╮
 queues:dict[int,deque]={}
@@ -268,8 +360,7 @@ class QueueView(discord.ui.View):
                 duration = int(track.get('duration', 0))
                 m, s = divmod(duration, 60)
                 duration_str = f"{m}:{s:02d}" if duration > 0 else "N/A"
-                title = track.get('title', 'Unknown')
-                queue_text += f"`{i}.` **{title[:50]}{'...' if len(title) > 50 else ''}**\n"
+                queue_text += f"`{i}.` **{track['title'][:50]}{'...' if len(track['title']) > 50 else ''}**\n"
                 queue_text += f"    👤 {track.get('uploader', 'Unknown')[:30]} | ⏱ {duration_str}\n\n"
             
             embed.description += f"\n\n{queue_text}"
@@ -391,7 +482,7 @@ async def _send_np(ctx, info, key):
         platform = "🟢 Spotify"
     
     emb = (discord.Embed(title="Đang phát",url=info.get("webpage_url"),
-            description=f"**{info.get('title','Unknown')}**\n👤 {info.get('uploader','?')}\n{platform}",
+            description=f"**{info['title']}**\n👤 {info.get('uploader','?')}\n{platform}",
             color=0x0061ff)
             .set_thumbnail(url=info.get("thumbnail"))
             .add_field(name="⏱ Thời lượng", value=f"{m}:{s:02d}"))
@@ -407,14 +498,9 @@ async def _next(key:int, ctx):
     if not q:
         start_idle_timer(key)
         return
-
+    
     cancel_idle_timer(key)
-    info=q.popleft()
-    info = await ensure_audio(info)
-    if not info or not info.get("url"):
-        # Skip if we couldn't retrieve details
-        return await _next(key, ctx)
-    info["url"] = info.get("url") or info.get("webpage_url")
+    info=q.popleft(); info["url"]=info.get("url") or info["webpage_url"]
     if loops.get(key):
         q.append(info)
     vc=ctx.voice_client; src=discord.FFmpegPCMAudio(info["url"],**FFMPEG_OPTS)
@@ -494,11 +580,10 @@ async def play(ctx, *, query:str):
         last_use[key]=datetime.now(timezone.utc)
         
         if added_count == 1:
-            first_title = tracks[0].get('title', 'Unknown')
-            if loading_msg:
-                await loading_msg.edit(content=f"✅ Đã thêm **{first_title}**.")
+            if loading_msg: 
+                await loading_msg.edit(content=f"✅ Đã thêm **{tracks[0]['title']}**.")
             else:
-                await ctx.reply(f"✅ Đã thêm **{first_title}**.")
+                await ctx.reply(f"✅ Đã thêm **{tracks[0]['title']}**.")
         else:
             if loading_msg:
                 await loading_msg.edit(content=f"✅ Đã thêm {added_count} bài vào hàng chờ.")
@@ -585,6 +670,10 @@ async def loop(ctx):
     key = _key(ctx)
     state = loops.get(key, False)
     loops[key] = not state
+    if loops[key]:
+        current = now_playing.get(key)
+        if current and current not in _queue(key):
+            _queue(key).appendleft(current)
     await ctx.reply("🔁 Đã bật loop." if loops[key] else "▶️ Đã tắt loop.")
 
 @bot.command(help="Đang phát", aliases=["np"])
@@ -627,8 +716,7 @@ async def remove(ctx, index: int):
         return
     removed = q.pop(index - 1)
     queues[key] = deque(q)
-    removed_title = removed.get('title', 'Unknown')
-    await ctx.reply(f"🗑️ Đã xoá **{removed_title}** khỏi hàng chờ.")
+    await ctx.reply(f"🗑️ Đã xoá **{removed['title']}** khỏi hàng chờ.")
 
 @bot.command(help="Ping")
 async def ping(ctx): 
