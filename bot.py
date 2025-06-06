@@ -167,11 +167,16 @@ async def fetch_info(q:str):
     return result if isinstance(result, list) else [result] if result else []
 
 def _blocking_ensure_audio(info:dict):
-    import yt_dlp
-    data = YTDL.extract_info(info.get("webpage_url") or info.get("url"), download=False)
-    if data and "entries" in data:
-        data = data["entries"][0]
-    info.update(data)
+    import yt_dlp, logging, os
+    log = logging.getLogger(f"cluster-{os.getenv('CLUSTER_ID', '0')}")
+    try:
+        data = YTDL.extract_info(info.get("webpage_url") or info.get("url"), download=False)
+        if data and "entries" in data:
+            data = data["entries"][0]
+        if data:
+            info.update(data)
+    except Exception as e:
+        log.warning(f"Could not resolve audio: {e}")
     return info
 
 async def ensure_audio(info:dict):
@@ -380,7 +385,7 @@ async def _send_np(ctx, info, key):
         platform = "🟢 Spotify"
     
     emb = (discord.Embed(title="Đang phát",url=info.get("webpage_url"),
-            description=f"**{info['title']}**\n👤 {info.get('uploader','?')}\n{platform}",
+            description=f"**{info.get('title','Unknown')}**\n👤 {info.get('uploader','?')}\n{platform}",
             color=0x0061ff)
             .set_thumbnail(url=info.get("thumbnail"))
             .add_field(name="⏱ Thời lượng", value=f"{m}:{s:02d}"))
