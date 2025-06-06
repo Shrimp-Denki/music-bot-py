@@ -168,15 +168,25 @@ async def fetch_info(q:str):
 
 def _blocking_ensure_audio(info:dict):
     import yt_dlp
-    data = YTDL.extract_info(info.get("webpage_url") or info.get("url"), download=False)
-    if data and "entries" in data:
-        data = data["entries"][0]
-    info.update(data)
-    return info
+    try:
+        data = YTDL.extract_info(info.get("webpage_url") or info.get("url"), download=False)
+        if not data:
+            return None
+        if "entries" in data:
+            data = data["entries"][0]
+        if not data:
+            return None
+        info.update(data)
+        return info
+    except Exception as e:
+        log.error(f"Error ensuring audio: {e}")
+        return None
 
 async def ensure_audio(info:dict):
     if not info.get("url") or info.get("url") == info.get("webpage_url"):
-        await asyncio.get_running_loop().run_in_executor(None, _blocking_ensure_audio, info)
+        result = await asyncio.get_running_loop().run_in_executor(None, _blocking_ensure_audio, info)
+        if result is None:
+            return None
     return info
 
 # ╭─ STATE ─╮
@@ -380,7 +390,7 @@ async def _send_np(ctx, info, key):
         platform = "🟢 Spotify"
     
     emb = (discord.Embed(title="Đang phát",url=info.get("webpage_url"),
-            description=f"**{info['title']}**\n👤 {info.get('uploader','?')}\n{platform}",
+            description=f"**{info.get('title','Unknown')}**\n👤 {info.get('uploader','?')}\n{platform}",
             color=0x0061ff)
             .set_thumbnail(url=info.get("thumbnail"))
             .add_field(name="⏱ Thời lượng", value=f"{m}:{s:02d}"))
@@ -399,7 +409,10 @@ async def _next(key:int, ctx):
 
     cancel_idle_timer(key)
     info=q.popleft()
-    await ensure_audio(info)
+    info = await ensure_audio(info)
+    if not info or not info.get("url"):
+        # Skip if we couldn't retrieve details
+        return await _next(key, ctx)
     info["url"] = info.get("url") or info.get("webpage_url")
     if loops.get(key):
         q.append(info)
