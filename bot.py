@@ -287,6 +287,7 @@ history:dict[int,deque]={}
 now_playing:dict[int,dict]={}
 last_use:dict[int,datetime]={}
 idle_timers:dict[int,asyncio.Task]={}
+loops:dict[int,bool]={}
 IDLE_TIMEOUT=60  # 1 minute of no music playing
 VOICE_TIMEOUT=1800  # 30 minutes of no activity
 
@@ -382,7 +383,9 @@ class QueueView(discord.ui.View):
 class MusicControls(discord.ui.View):
     def __init__(self, key:int, *, timeout:float|None=1800, persistent=False):
         super().__init__(timeout=None if persistent else timeout)
-        self.key=key; self.paused=False; self.loop=False
+        self.key=key; self.paused=False; self.loop=loops.get(key, False)
+        if self.loop:
+            self.loop_btn.style = discord.ButtonStyle.success
 
     @discord.ui.button(label="⏸️", style=discord.ButtonStyle.secondary, custom_id="btn_pause")
     async def pause_btn(self, intr:discord.Interaction, btn:discord.ui.Button):
@@ -409,6 +412,15 @@ class MusicControls(discord.ui.View):
         intr.guild.voice_client and intr.guild.voice_client.stop()
         await intr.response.defer()
 
+    @discord.ui.button(label="🔀", style=discord.ButtonStyle.secondary, custom_id="btn_shuffle")
+    async def shuffle_btn(self, intr,_):
+        q=list(_queue(self.key))
+        if len(q)<2:
+            await intr.response.send_message("❌ Hàng chờ không đủ bài để trộn.", ephemeral=True)
+            return
+        random.shuffle(q); queues[self.key]=deque(q)
+        await intr.response.send_message("🔀 Đã trộn hàng chờ.", ephemeral=True)
+
     @discord.ui.button(label="⏹️", style=discord.ButtonStyle.danger, custom_id="btn_stop")
     async def stop_btn(self, intr,_):
         vc = intr.guild.voice_client
@@ -423,9 +435,20 @@ class MusicControls(discord.ui.View):
             clear_owner(key)
         await intr.response.defer()
 
+    @discord.ui.button(label="📋", style=discord.ButtonStyle.secondary, custom_id="btn_queue")
+    async def queue_btn(self, intr,_):
+        q=list(_queue(self.key))
+        if not q:
+            emb=discord.Embed(title="🎵 Hàng chờ phát nhạc", description="Hàng chờ trống", color=0x0061ff)
+            await intr.response.send_message(embed=emb, ephemeral=True)
+            return
+        view=QueueView(q, self.key)
+        await intr.response.send_message(embed=view.get_embed(), view=view, ephemeral=True)
+
     @discord.ui.button(label="🔁", style=discord.ButtonStyle.secondary, custom_id="btn_loop")
     async def loop_btn(self, intr, btn):
         self.loop=not self.loop
+        loops[self.key]=self.loop
         btn.style = discord.ButtonStyle.success if self.loop else discord.ButtonStyle.secondary
         await intr.response.edit_message(view=self)
 
@@ -478,6 +501,8 @@ async def _next(key:int, ctx):
     
     cancel_idle_timer(key)
     info=q.popleft(); info["url"]=info.get("url") or info["webpage_url"]
+    if loops.get(key):
+        q.append(info)
     vc=ctx.voice_client; src=discord.FFmpegPCMAudio(info["url"],**FFMPEG_OPTS)
     if key in now_playing: _history(key).append(now_playing[key])
     now_playing[key]=info; last_use[key]=datetime.now(timezone.utc)
@@ -606,6 +631,24 @@ async def previous(ctx):
     _queue(key).appendleft(hist.pop()); 
     if ctx.voice_client: ctx.voice_client.stop()
 
+@bot.command(help="Rời kênh voice")
+async def leave(ctx):
+    if not cluster_check(ctx):
+        return
+    vc = ctx.voice_client
+    if vc:
+        await vc.disconnect(force=True)
+        key = _key(ctx)
+        queues.pop(key, None)
+        history.pop(key, None)
+        now_playing.pop(key, None)
+        last_use.pop(key, None)
+        cancel_idle_timer(key)
+        clear_owner(key)
+        await ctx.reply("👋 Đã rời kênh.")
+    else:
+        await ctx.reply("❌ Bot không ở trong kênh.")
+
 @bot.command(help="Tạm dừng")
 async def pause(ctx):
     if cluster_check(ctx) and ctx.voice_client and ctx.voice_client.is_playing():
@@ -619,6 +662,15 @@ async def resume(ctx):
         ctx.voice_client.resume(); 
         cancel_idle_timer(_key(ctx))
         await ctx.message.add_reaction("▶️")
+
+@bot.command(help="Bật/Tắt lặp lại hàng chờ")
+async def loop(ctx):
+    if not cluster_check(ctx):
+        return
+    key = _key(ctx)
+    state = loops.get(key, False)
+    loops[key] = not state
+    await ctx.reply("🔁 Đã bật loop." if loops[key] else "▶️ Đã tắt loop.")
 
 @bot.command(help="Đang phát", aliases=["np"])
 async def nowplaying(ctx):
@@ -635,6 +687,32 @@ async def clearqueue(ctx):
         key = _key(ctx)
         _queue(key).clear()
         await ctx.reply("🗑️ Đã xoá hàng chờ.")
+
+@bot.command(help="Trộn ngẫu nhiên hàng chờ")
+async def shuffle(ctx):
+    if not cluster_check(ctx):
+        return
+    key = _key(ctx)
+    q = list(_queue(key))
+    if len(q) < 2:
+        await ctx.reply("❌ Hàng chờ không đủ bài để trộn.")
+        return
+    random.shuffle(q)
+    queues[key] = deque(q)
+    await ctx.reply("🔀 Đã trộn hàng chờ.")
+
+@bot.command(help="Xoá bài trong hàng chờ theo số thứ tự")
+async def remove(ctx, index: int):
+    if not cluster_check(ctx):
+        return
+    key = _key(ctx)
+    q = list(_queue(key))
+    if index < 1 or index > len(q):
+        await ctx.reply("❌ Số thứ tự không hợp lệ.")
+        return
+    removed = q.pop(index - 1)
+    queues[key] = deque(q)
+    await ctx.reply(f"🗑️ Đã xoá **{removed['title']}** khỏi hàng chờ.")
 
 @bot.command(help="Ping")
 async def ping(ctx): 
@@ -658,7 +736,11 @@ async def commands_list(ctx):
         ("`previous` - Bài trước", "⏮️"),
         ("`pause` - Tạm dừng", "⏸️"),
         ("`resume` - Tiếp tục", "▶️"),
+        ("`leave` - Rời kênh voice", "👋"),
+        ("`loop` - Bật/Tắt lặp lại", "🔁"),
         ("`clear` - Xóa hàng chờ", "🗑️"),
+        ("`shuffle` - Trộn hàng chờ", "🔀"),
+        ("`remove <số>` - Xóa bài khỏi hàng chờ", "❌"),
         ("`ping` - Kiểm tra độ trễ", "🏓"),
         ("`commands` - Hiển thị lệnh này", "📝")
     ]
