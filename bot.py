@@ -268,7 +268,8 @@ class QueueView(discord.ui.View):
                 duration = int(track.get('duration', 0))
                 m, s = divmod(duration, 60)
                 duration_str = f"{m}:{s:02d}" if duration > 0 else "N/A"
-                queue_text += f"`{i}.` **{track['title'][:50]}{'...' if len(track['title']) > 50 else ''}**\n"
+                title = track.get('title', 'Unknown')
+                queue_text += f"`{i}.` **{title[:50]}{'...' if len(title) > 50 else ''}**\n"
                 queue_text += f"    👤 {track.get('uploader', 'Unknown')[:30]} | ⏱ {duration_str}\n\n"
             
             embed.description += f"\n\n{queue_text}"
@@ -493,10 +494,11 @@ async def play(ctx, *, query:str):
         last_use[key]=datetime.now(timezone.utc)
         
         if added_count == 1:
-            if loading_msg: 
-                await loading_msg.edit(content=f"✅ Đã thêm **{tracks[0]['title']}**.")
+            first_title = tracks[0].get('title', 'Unknown')
+            if loading_msg:
+                await loading_msg.edit(content=f"✅ Đã thêm **{first_title}**.")
             else:
-                await ctx.reply(f"✅ Đã thêm **{tracks[0]['title']}**.")
+                await ctx.reply(f"✅ Đã thêm **{first_title}**.")
         else:
             if loading_msg:
                 await loading_msg.edit(content=f"✅ Đã thêm {added_count} bài vào hàng chờ.")
@@ -625,7 +627,8 @@ async def remove(ctx, index: int):
         return
     removed = q.pop(index - 1)
     queues[key] = deque(q)
-    await ctx.reply(f"🗑️ Đã xoá **{removed['title']}** khỏi hàng chờ.")
+    removed_title = removed.get('title', 'Unknown')
+    await ctx.reply(f"🗑️ Đã xoá **{removed_title}** khỏi hàng chờ.")
 
 @bot.command(help="Ping")
 async def ping(ctx): 
