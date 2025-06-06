@@ -138,143 +138,61 @@ def detect_platform_from_url(url: str) -> str:
     return 'youtube'
 
 def _blocking_fetch(q: str):
-    """Fetch music info with platform detection"""
-    platform = 'youtube'  # Default platform
-    search_term = q  # Default search term
-    
+    """Fetch music info exclusively from SoundCloud."""
+
+    search_term = q
+
+    import logging
+    log = logging.getLogger(f"cluster-{os.getenv('CLUSTER_ID', '0')}")
+
+    import yt_dlp
+
+    # yt-dlp options for SoundCloud search
+    ytdl_opts = {
+        "format": "bestaudio/best",
+        "quiet": True,
+        "default_search": "scsearch",
+        "extractflat": False,
+        "extract_flat": False,
+        "no_warnings": True,
+        "ignoreerrors": True,
+    }
+
+    sc_ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+
     try:
-        platform, search_term = parse_query(q)
-        # Use the log variable from the main module
-        import logging
-        log = logging.getLogger(f"cluster-{os.getenv('CLUSTER_ID', '0')}")
-        log.info(f"Platform: {platform}, Search: {search_term}")
-        
-        # Get YTDL from main module - we'll need to pass it as parameter or make it global
-        # For now, create a local instance
-        import yt_dlp
-        
-        ytdl_base_opts = {
-            "format": "bestaudio/best",
-            "quiet": True,
-            "default_search": "ytsearch",
-            "extractflat": False,
-            "extract_flat": False,
-            "no_warnings": True,
-            "ignoreerrors": True
-        }
-        
-        # Configure yt-dlp based on platform
-        ytdl_opts = ytdl_base_opts.copy()
-        
-        # Set the correct default_search for each platform
-        if platform == 'soundcloud':
-            ytdl_opts['default_search'] = 'scsearch'
-        elif platform == 'youtube':
-            ytdl_opts['default_search'] = 'ytsearch'
-        else:
-            ytdl_opts['default_search'] = 'scsearch'
-            #taserandom = random.randint(1,2)
-            #if taserandom == 1:
-            #    ytdl_opts['default_search'] = 'scsearch'
-            #else:
-            #    ytdl_opts['default_search'] = 'ytsearch'
-        
-        # Create temporary YTDL instance with updated options
-        temp_ytdl = yt_dlp.YoutubeDL(ytdl_opts)
-        
-        # Handle special platforms that need metadata extraction
-        if platform in ['spotify', 'applemusic', 'deezer', 'yandex'] and search_term.startswith(('http://', 'https://')):
+        # If query is a URL, try to extract metadata to form a search term
+        if re.match(r"https?://", search_term):
             try:
-                # Try to extract metadata from the URL
-                metadata = temp_ytdl.extract_info(search_term, download=False)
-                if metadata:
-                    # Create search query from metadata
-                    title = metadata.get('title', '')
-                    artist = metadata.get('artist', '') or metadata.get('uploader', '')
-                    album = metadata.get('album', '')
-                    
-                    # Build search query
+                meta = sc_ytdl.extract_info(search_term, download=False)
+                if meta:
+                    if "entries" in meta and meta["entries"]:
+                        meta = meta["entries"][0]
+                    title = meta.get("title", "")
+                    artist = meta.get("artist", "") or meta.get("uploader", "")
                     search_parts = [title]
                     if artist:
                         search_parts.append(artist)
-                    if album and len(search_parts) < 2:
-                        search_parts.append(album)
-                    
-                    # Use ytsearch for these platforms
-                    search_query = ' '.join(search_parts)
-                    log.info(f"Converted {platform} URL to search: {search_query}")
-                    
-                    # Search on YouTube with ytsearch
-                    youtube_ytdl = yt_dlp.YoutubeDL({**ytdl_base_opts, 'default_search': 'ytsearch'})
-                    data = youtube_ytdl.extract_info(search_query, download=False)
-                else:
-                    # Fallback to original query
-                    data = temp_ytdl.extract_info(search_term, download=False)
+                    search_term = " ".join(part for part in search_parts if part)
+                    log.info(f"Converted URL to SoundCloud search: {search_term}")
             except Exception as e:
-                log.warning(f"Failed to extract from {platform}: {e}")
-                # Fallback to YouTube search
-                youtube_ytdl = yt_dlp.YoutubeDL({**ytdl_base_opts, 'default_search': 'ytsearch'})
-                data = youtube_ytdl.extract_info(search_term, download=False)
-        else:
-            # For direct search queries or URLs
-            if search_term.startswith(('http://', 'https://')):
-                # It's a URL, extract directly
-                data = temp_ytdl.extract_info(search_term, download=False)
-            else:
-                # It's a search term, use the configured search prefix
-                data = temp_ytdl.extract_info(search_term, download=False)
-        
-        # Process results
+                log.warning(f"Metadata extraction failed: {e}")
+
+        # Always search on SoundCloud using scsearch
+        data = sc_ytdl.extract_info(search_term, download=False)
+
         if data and "entries" in data:
             results = [entry for entry in data["entries"] if entry]
-            # Tag results with platform info
-            for result in results:
-                if result:
-                    result['detected_platform'] = platform
+            for r in results:
+                r["detected_platform"] = "soundcloud"
             return results
         elif data:
-            data['detected_platform'] = platform
+            data["detected_platform"] = "soundcloud"
             return [data]
-        
+
     except Exception as e:
-        # Handle the case where log might not be defined
-        try:
-            log.error(f"Error fetching from {platform}: {e}")
-        except:
-            print(f"Error fetching from {platform}: {e}")
-        
-        try:
-            # Fallback to default YouTube search
-            search_term_fallback = search_term
-            # Remove any platform prefix from the fallback search
-            if ':' in search_term_fallback and not search_term_fallback.startswith(('http://', 'https://')):
-                search_term_fallback = search_term_fallback.split(':', 1)[1]
-            
-            fallback_ytdl = yt_dlp.YoutubeDL({
-                "format": "bestaudio/best",
-                "quiet": True,
-                "default_search": "scsearch",
-                "extractflat": False,
-                "extract_flat": False,
-                "no_warnings": True,
-                "ignoreerrors": True
-            })
-            data = fallback_ytdl.extract_info(search_term_fallback, download=False)
-            if data and "entries" in data:
-                results = [entry for entry in data["entries"] if entry]
-                for result in results:
-                    if result:
-                        result['detected_platform'] = 'youtube'
-                return results
-            elif data:
-                data['detected_platform'] = 'youtube'
-                return [data]
-        except Exception as fallback_error:
-            try:
-                log.error(f"Fallback search also failed: {fallback_error}")
-            except:
-                print(f"Fallback search also failed: {fallback_error}")
-    
+        log.error(f"Error fetching from SoundCloud: {e}")
+
     return []
 
 async def fetch_info(q:str): 
