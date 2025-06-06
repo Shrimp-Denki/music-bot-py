@@ -573,7 +573,7 @@ async def play(ctx, *, query:str):
         if loading_msg: await loading_msg.edit(content="❌ Có lỗi xảy ra khi tải nhạc.")
         else: await ctx.reply("❌ Có lỗi xảy ra khi tải nhạc.")
 
-@bot.command(help="Hiển thị hàng chờ phát nhạc")
+@bot.command(help="Hiển thị hàng chờ phát nhạc", aliases=["q"])
 async def queue(ctx):
     if not cluster_check(ctx): return
     
@@ -620,7 +620,7 @@ async def resume(ctx):
         cancel_idle_timer(_key(ctx))
         await ctx.message.add_reaction("▶️")
 
-@bot.command(help="Đang phát")
+@bot.command(help="Đang phát", aliases=["np"])
 async def nowplaying(ctx):
     if cluster_check(ctx): 
         info=now_playing.get(_key(ctx))
