@@ -36,15 +36,14 @@ def get_owner(cid:int)->int|None:  r=conn.execute("SELECT owner_id FROM owners W
 def clear_owner(cid:int):          conn.execute("DELETE FROM owners WHERE channel_id=?", (cid,))
 
 # ╭─ yt-dlp & FFmpeg ─╮
-YTDL = yt_dlp.YoutubeDL({
+YTDL_OPTS = {
     "format": "bestaudio/best",
     "quiet": True,
     "default_search": "scsearch",
-    # "geo_bypass": True, 
-    # "geo_bypass_country": "VN",
-    "extractflat": False,
-    "extract_flat": False
-})
+    "no_warnings": True,
+    "ignoreerrors": True,
+}
+YTDL = yt_dlp.YoutubeDL(YTDL_OPTS)
 FFMPEG_OPTS = {"before_options":"-nostdin -reconnect 1 -reconnect_delay_max 5",
                "options":"-vn -loglevel error"}
 
@@ -138,66 +137,47 @@ def detect_platform_from_url(url: str) -> str:
     return 'youtube'
 
 def _blocking_fetch(q: str):
-    """Fetch music info exclusively from SoundCloud."""
-
-    search_term = q
+    """Fetch music/playlist information using yt-dlp."""
 
     import logging
-    log = logging.getLogger(f"cluster-{os.getenv('CLUSTER_ID', '0')}")
-
     import yt_dlp
 
-    # yt-dlp options for SoundCloud search
-    ytdl_opts = {
-        "format": "bestaudio/best",
-        "quiet": True,
-        "default_search": "scsearch",
-        "extractflat": False,
-        "extract_flat": False,
-        "no_warnings": True,
-        "ignoreerrors": True,
-    }
+    log = logging.getLogger(f"cluster-{os.getenv('CLUSTER_ID', '0')}")
 
-    sc_ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+    opts = YTDL_OPTS.copy()
+    opts["extract_flat"] = True  # faster playlist processing
+
+    ytdl = yt_dlp.YoutubeDL(opts)
 
     try:
-        # If query is a URL, try to extract metadata to form a search term
-        if re.match(r"https?://", search_term):
-            try:
-                meta = sc_ytdl.extract_info(search_term, download=False)
-                if meta:
-                    if "entries" in meta and meta["entries"]:
-                        meta = meta["entries"][0]
-                    title = meta.get("title", "")
-                    artist = meta.get("artist", "") or meta.get("uploader", "")
-                    search_parts = [title]
-                    if artist:
-                        search_parts.append(artist)
-                    search_term = " ".join(part for part in search_parts if part)
-                    log.info(f"Converted URL to SoundCloud search: {search_term}")
-            except Exception as e:
-                log.warning(f"Metadata extraction failed: {e}")
-
-        # Always search on SoundCloud using scsearch
-        data = sc_ytdl.extract_info(search_term, download=False)
+        data = ytdl.extract_info(q, download=False)
 
         if data and "entries" in data:
-            results = [entry for entry in data["entries"] if entry]
-            for r in results:
-                r["detected_platform"] = "soundcloud"
-            return results
+            return [e for e in data["entries"] if e]
         elif data:
-            data["detected_platform"] = "soundcloud"
             return [data]
 
     except Exception as e:
-        log.error(f"Error fetching from SoundCloud: {e}")
+        log.error(f"Error fetching info: {e}")
 
     return []
 
-async def fetch_info(q:str): 
+async def fetch_info(q:str):
     result = await asyncio.get_running_loop().run_in_executor(None, _blocking_fetch, q)
     return result if isinstance(result, list) else [result] if result else []
+
+def _blocking_ensure_audio(info:dict):
+    import yt_dlp
+    data = YTDL.extract_info(info.get("webpage_url") or info.get("url"), download=False)
+    if data and "entries" in data:
+        data = data["entries"][0]
+    info.update(data)
+    return info
+
+async def ensure_audio(info:dict):
+    if not info.get("url") or info.get("url") == info.get("webpage_url"):
+        await asyncio.get_running_loop().run_in_executor(None, _blocking_ensure_audio, info)
+    return info
 
 # ╭─ STATE ─╮
 queues:dict[int,deque]={}
@@ -416,9 +396,11 @@ async def _next(key:int, ctx):
     if not q:
         start_idle_timer(key)
         return
-    
+
     cancel_idle_timer(key)
-    info=q.popleft(); info["url"]=info.get("url") or info["webpage_url"]
+    info=q.popleft()
+    await ensure_audio(info)
+    info["url"] = info.get("url") or info.get("webpage_url")
     if loops.get(key):
         q.append(info)
     vc=ctx.voice_client; src=discord.FFmpegPCMAudio(info["url"],**FFMPEG_OPTS)
