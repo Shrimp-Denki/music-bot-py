@@ -1,5 +1,3 @@
-discord.py
+nextcord
+mafic
 python-dotenv
-yt-dlp
-spotipy
-PyNaCl>=1.5.0
